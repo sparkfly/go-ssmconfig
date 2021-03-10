@@ -428,7 +428,7 @@ func lookup(key string, opts *options, l Lookuper) (string, error) {
 				key = pl.prefix + key
 			}
 
-			return "", fmt.Errorf("%w: %s", ErrMissingRequired, key)
+			return "", fmt.Errorf("%w: %s: %s", ErrMissingRequired, key, err)
 		}
 
 		if opts.Default != "" {
