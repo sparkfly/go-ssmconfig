@@ -1,4 +1,4 @@
-// Copyright The envconfig Authors
+// Copyright The ssmconfig Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package envconfig
+package ssmconfig
 
 import (
 	"encoding/base64"
@@ -21,10 +21,10 @@ import (
 )
 
 // Base64Bytes is a slice of bytes where the information is base64-encoded in
-// the environment variable.
+// the SSM parameter.
 type Base64Bytes []byte
 
-// EnvDecode implements env.Decoder.
+// EnvDecode implements ssm.Decoder.
 func (b *Base64Bytes) EnvDecode(val string) error {
 	val = strings.ReplaceAll(val, "+", "-")
 	val = strings.ReplaceAll(val, "/", "_")
@@ -41,7 +41,7 @@ func (b Base64Bytes) Bytes() []byte {
 }
 
 // HexBytes is a slice of bytes where the information is hex-encoded in the
-// environment variable.
+// SSM parameter.
 type HexBytes []byte
 
 // EnvDecode implements env.Decoder.

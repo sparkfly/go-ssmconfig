@@ -1,4 +1,4 @@
-// Copyright The envconfig Authors
+// Copyright The ssmconfig Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,18 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package envconfig populates struct fields based on environment variable
+// Package ssmconfig populates struct fields based on SSM parameter
 // values (or anything that responds to "Lookup"). Structs declare their
-// environment dependencies using the `env` tag with the key being the name of
-// the environment variable, case sensitive.
+// SSM dependencies using the `ssm` tag with the key being the name of
+// the SSM parameter, case sensitive.
 //
 //     type MyStruct struct {
-//         A string `env:"A"` // resolves A to $A
-//         B string `env:"B,required"` // resolves B to $B, errors if $B is unset
-//         C string `env:"C,default=foo"` // resolves C to $C, defaults to "foo"
+//         A string `ssm:"A"` // resolves A to $A
+//         B string `ssm:"B,required"` // resolves B to $B, errors if $B is unset
+//         C string `ssm:"C,default=foo"` // resolves C to $C, defaults to "foo"
 //
-//         D string `env:"D,required,default=foo"` // error, cannot be required and default
-//         E string `env:""` // error, must specify key
+//         D string `ssm:"D,required,default=foo"` // error, cannot be required and default
+//         E string `ssm:""` // error, must specify key
 //     }
 //
 // All built-in types are supported except Func and Chan. If you need to define
@@ -38,19 +38,19 @@
 //         return nil
 //     }
 //
-// In the environment, slices are specified as comma-separated values:
+// In SSM, slices are specified as comma-separated values:
 //
 //     export MYVAR="a,b,c,d" // []string{"a", "b", "c", "d"}
 //
-// In the environment, maps are specified as comma-separated key:value pairs:
+// In SSM, maps are specified as comma-separated key:value pairs:
 //
 //     export MYVAR="a:b,c:d" // map[string]string{"a":"b", "c":"d"}
 //
-// If you need to modify environment variable values before processing, you can
+// If you need to modify SSM parameter values before processing, you can
 // specify a custom mutator:
 //
 //     type Config struct {
-//         Password `env:"PASSWORD_SECRET"`
+//         Password `ssm:"PASSWORD_SECRET"`
 //     }
 //
 //     func resolveSecretFunc(ctx context.Context, key, value string) (string, error) {
@@ -63,7 +63,7 @@
 //     var config Config
 //     ProcessWith(&config, OsLookuper(), resolveSecretFunc)
 //
-package envconfig
+package ssmconfig
 
 import (
 	"context"
@@ -77,17 +77,21 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/session"
+	"github.com/aws/aws-sdk-go/service/ssm"
 )
 
 const (
-	envTag = "env"
+	ssmTag = "ssm"
 
 	optRequired = "required"
 	optDefault  = "default="
 	optPrefix   = "prefix="
 )
 
-// Error is a custom error type for errors returned by envconfig.
+// Error is a custom error type for errors returned by ssmconfig.
 type Error string
 
 // Error implements error.
@@ -113,32 +117,53 @@ type Lookuper interface {
 	// Lookup searches for the given key and returns the corresponding string
 	// value. If a value is found, it returns the value and true. If a value is
 	// not found, it returns the empty string and false.
-	Lookup(key string) (string, bool)
+	Lookup(key string) (string, error)
 }
 
-// osLookuper looks up environment configuration from the local environment.
-type osLookuper struct{}
+// ssmLookuper looks up ssmironment configuration from AWS SSM.
+type ssmLookuper struct {
+	ssmService *ssm.SSM
+}
 
 // Verify implements interface.
-var _ Lookuper = (*osLookuper)(nil)
+var _ Lookuper = (*ssmLookuper)(nil)
 
-func (o *osLookuper) Lookup(key string) (string, bool) {
-	return os.LookupEnv(key)
+func (o *ssmLookuper) Lookup(key string) (string, error) {
+	param, err := o.ssmService.GetParameter(&ssm.GetParameterInput{
+		Name:           aws.String(key),
+		WithDecryption: aws.Bool(true),
+	})
+	if err != nil {
+		return "", err
+	}
+
+	return *param.Parameter.Value, nil
 }
 
-// OsLookuper returns a lookuper that uses the environment (os.LookupEnv) to
+// SSMLookuper returns a lookuper that uses the AWS SSM API to
 // resolve values.
-func OsLookuper() Lookuper {
-	return new(osLookuper)
+func SSMLookuper() Lookuper {
+	sess, err := session.NewSession()
+	if err != nil {
+		panic(err)
+	}
+
+	ssmsvc := ssm.New(sess, aws.NewConfig())
+	return &ssmLookuper{
+		ssmService: ssmsvc,
+	}
 }
 
 type mapLookuper map[string]string
 
 var _ Lookuper = (*mapLookuper)(nil)
 
-func (m mapLookuper) Lookup(key string) (string, bool) {
+func (m mapLookuper) Lookup(key string) (string, error) {
 	v, ok := m[key]
-	return v, ok
+	if !ok {
+		return "", errors.New(key + " not found")
+	}
+	return v, nil
 }
 
 // MapLookuper looks up environment configuration from a provided map. This is
@@ -154,13 +179,13 @@ type multiLookuper struct {
 
 var _ Lookuper = (*multiLookuper)(nil)
 
-func (m *multiLookuper) Lookup(key string) (string, bool) {
+func (m *multiLookuper) Lookup(key string) (string, error) {
 	for _, l := range m.ls {
-		if v, ok := l.Lookup(key); ok {
-			return v, true
+		if v, err := l.Lookup(key); err == nil {
+			return v, nil
 		}
 	}
-	return "", false
+	return "", errors.New(key + "not found")
 }
 
 // PrefixLookuper looks up environment configuration using the specified prefix.
@@ -178,7 +203,7 @@ type prefixLookuper struct {
 	l      Lookuper
 }
 
-func (p *prefixLookuper) Lookup(key string) (string, bool) {
+func (p *prefixLookuper) Lookup(key string) (string, error) {
 	return p.l.Lookup(p.prefix + key)
 }
 
@@ -202,7 +227,7 @@ type Decoder interface {
 }
 
 // MutatorFunc is a function that mutates a given value before it is passed
-// along for processing. This is useful if you want to mutate the environment
+// along for processing. This is useful if you want to mutate SSM
 // variable value before it's converted to the proper type.
 type MutatorFunc func(ctx context.Context, k, v string) (string, error)
 
@@ -213,10 +238,10 @@ type options struct {
 	Prefix   string
 }
 
-// Process processes the struct using the environment. See ProcessWith for a
+// Process processes the struct using SSM. See ProcessWith for a
 // more customizable version.
 func Process(ctx context.Context, i interface{}) error {
-	return ProcessWith(ctx, i, OsLookuper())
+	return ProcessWith(ctx, i, SSMLookuper())
 }
 
 // ProcessWith processes the given interface with the given lookuper. See the
@@ -241,11 +266,11 @@ func ProcessWith(ctx context.Context, i interface{}, l Lookuper, fns ...MutatorF
 	for i := 0; i < t.NumField(); i++ {
 		ef := e.Field(i)
 		tf := t.Field(i)
-		tag := tf.Tag.Get(envTag)
+		tag := tf.Tag.Get(ssmTag)
 
 		if !ef.CanSet() {
 			if tag != "" {
-				// There's an "env" tag on a private field, we can't alter it, and it's
+				// There's an "ssm" tag on a private field, we can't alter it, and it's
 				// likely a mistake. Return an error so the user can handle.
 				return fmt.Errorf("%s: %w", tf.Name, ErrPrivateField)
 			}
@@ -284,8 +309,8 @@ func ProcessWith(ctx context.Context, i interface{}, l Lookuper, fns ...MutatorF
 			}
 
 			// Lookup the value, ignoring an error if the key isn't defined. This is
-			// required for nested structs that don't declare their own `env` keys,
-			// but have internal fields with an `env` defined.
+			// required for nested structs that don't declare their own `ssm` keys,
+			// but have internal fields with an `ssm` defined.
 			val, err := lookup(key, opts, l)
 			if err != nil && !errors.Is(err, ErrMissingKey) {
 				return fmt.Errorf("%s: %w", tf.Name, err)
@@ -315,8 +340,8 @@ func ProcessWith(ctx context.Context, i interface{}, l Lookuper, fns ...MutatorF
 			return ErrPrefixNotStruct
 		}
 
-		// Stop processing if there's no env tag (this comes after nested parsing),
-		// in case there's an env tag in an embedded struct.
+		// Stop processing if there's no ssm tag (this comes after nested parsing),
+		// in case there's an ssm tag in an embedded struct.
 		if tag == "" {
 			continue
 		}
@@ -351,7 +376,7 @@ func ProcessWith(ctx context.Context, i interface{}, l Lookuper, fns ...MutatorF
 	return nil
 }
 
-// keyAndOpts parses the given tag value (e.g. env:"foo,required") and
+// keyAndOpts parses the given tag value (e.g. ssm:"foo,required") and
 // returns the key name and options as a list.
 func keyAndOpts(tag string) (string, *options, error) {
 	parts := strings.Split(tag, ",")
@@ -384,8 +409,8 @@ LOOP:
 // lookup looks up the given key using the provided Lookuper and options.
 func lookup(key string, opts *options, l Lookuper) (string, error) {
 	if key == "" {
-		// The struct has something like `env:",required"`, which is likely a
-		// mistake. We could try to infer the envvar from the field name, but that
+		// The struct has something like `ssm:",required"`, which is likely a
+		// mistake. We could try to infer the ssmvar from the field name, but that
 		// feels too magical.
 		return "", ErrMissingKey
 	}
@@ -396,8 +421,8 @@ func lookup(key string, opts *options, l Lookuper) (string, error) {
 	}
 
 	// Lookup value.
-	val, ok := l.Lookup(key)
-	if !ok {
+	val, err := l.Lookup(key)
+	if err != nil {
 		if opts.Required {
 			if pl, ok := l.(*prefixLookuper); ok {
 				key = pl.prefix + key
@@ -410,8 +435,8 @@ func lookup(key string, opts *options, l Lookuper) (string, error) {
 			// Expand the default value. This allows for a default value that maps to
 			// a different variable.
 			val = os.Expand(opts.Default, func(i string) string {
-				s, ok := l.Lookup(i)
-				if ok {
+				s, err := l.Lookup(i)
+				if err != nil {
 					return s
 				}
 				return ""

@@ -1,4 +1,4 @@
-module github.com/sethvargo/go-envconfig/tools
+module github.com/sparkfly/go-ssmconfig/tools
 
 go 1.14
 
